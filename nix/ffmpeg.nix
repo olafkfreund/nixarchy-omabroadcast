@@ -79,6 +79,7 @@ stdenv.mkDerivation {
   # Flags come from upstream's FLAGS="…" block, parsed with sed (never sourced).
   configurePhase = ''
     runHook preConfigure
+    [ "$(grep -c '^FLAGS="' ${appSrc}/bin/build-ffmpeg)" = 1 ] || { echo "expected one FLAGS= block in bin/build-ffmpeg" >&2; exit 1; }
     flags=$(sed -n '/^FLAGS="/,/"$/p' ${appSrc}/bin/build-ffmpeg \
       | sed 's/^FLAGS="//; s/"$//' | tr '\n' ' ' | sed 's/--prefix=[^ ]*//')
     # An empty or renamed block must not fall back to defaults.
@@ -88,6 +89,7 @@ stdenv.mkDerivation {
         *) echo "FLAGS block in bin/build-ffmpeg lacks $f: $flags" >&2; exit 1 ;;
       esac
     done
+    case " $flags " in *" --enable-nonfree "*) echo "--enable-nonfree: not redistributable" >&2; exit 1 ;; esac
     echo "configure flags: $flags"
     # Unwrapped clang: FFmpeg retargets it freestanding for --enable-cuda-llvm (as nixpkgs' ffmpeg does).
     ./configure --prefix=$out --nvcc=${lib.getExe buildPackages.clang.cc} $flags

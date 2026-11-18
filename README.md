@@ -27,8 +27,8 @@ inputs.nixarchy-omabroadcast = {
 }
 ```
 
-The module installs the package and, unless you set them yourself, enables
-`xdg.portal` and PipeWire with Pulse support.
+The module only installs the package; the desktop services below are yours
+to enable.
 
 ## Prerequisites
 

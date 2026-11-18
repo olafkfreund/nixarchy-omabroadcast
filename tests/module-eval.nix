@@ -19,6 +19,7 @@ let
         ];
       };
     in
+    assert builtins.all (a: a.assertion) sys.config.assertions;
     builtins.elem pkg sys.config.environment.systemPackages;
 in
 {

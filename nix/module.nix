@@ -15,11 +15,8 @@ in
   };
 
   config = lib.mkIf cfg.enable {
+    # Portal and PipeWire stay host-managed: defaulting them on breaks hosts with no
+    # portal backend (assertion) or with PulseAudio. See README prerequisites.
     environment.systemPackages = [ cfg.package ];
-    xdg.portal.enable = lib.mkDefault true;
-    services.pipewire = {
-      enable = lib.mkDefault true;
-      pulse.enable = lib.mkDefault true;
-    };
   };
 }

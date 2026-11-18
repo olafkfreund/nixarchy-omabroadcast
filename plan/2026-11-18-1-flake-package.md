@@ -256,3 +256,20 @@ reviewers:
   (`gh workflow disable update.yml`).
 - p620: `sudo nixos-rebuild switch --rollback`, then revert the
   `~/.config/nixos` branch commit (not merged to its main without the owner).
+
+## Deviations from review (step 9)
+
+- Module: dropped the spec's `xdg.portal.enable` and `services.pipewire`
+  `mkDefault`s. Opus review verified the portal default fails NixOS's
+  assertion on hosts without `xdg.portal.extraPortals`, and the PipeWire one
+  conflicts with PulseAudio hosts. The module now only installs the package;
+  README lists them as prerequisites. `tests/module-eval.nix` also asserts
+  no failed `config.assertions` and runs as `checks.module`.
+- Probe asserts every `libav*`/`libsw*` resolves to `ffmpeg-omabroadcast`.
+- `nix/ffmpeg.nix`: fails unless exactly one `FLAGS="` block, and on
+  `--enable-nonfree`.
+- `update.yml`: commit job only runs on `refs/heads/main`.
+- FFmpeg `COPYING.GPLv3` lives in `share/licenses/omabroadcast/ffmpeg/`.
+- Accepted as-is (noted): a push to `main` mid-run makes that night's push
+  fail (retried next night); bot pushes don't trigger `ci.yml` (the update
+  job runs the same `nix flake check`).

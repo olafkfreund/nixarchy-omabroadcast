@@ -30,10 +30,14 @@
 
       checks.x86_64-linux = {
         build = omabroadcast;
+        module =
+          assert import ./tests/module-eval.nix self == { off = false; on = true; };
+          pkgs.emptyFile;
         probe = pkgs.runCommand "omabroadcast-probe" { nativeBuildInputs = [ pkgs.glibc.bin ]; } ''
           export HOME=$TMPDIR XDG_RUNTIME_DIR=$TMPDIR QT_QPA_PLATFORM=offscreen
           ${omabroadcast}/bin/omabroadcast --probe
-          ldd ${omabroadcast}/bin/.omabroadcast-wrapped | grep 'libavcodec' | grep -q ffmpeg-omabroadcast
+          ldd ${omabroadcast}/bin/.omabroadcast-wrapped | grep -E 'lib(av|sw)' > libs
+          grep -q libavcodec libs && ! grep -v ffmpeg-omabroadcast libs
           grep -a -q apv_vulkan ${ffmpeg-omabroadcast}/lib/libavcodec.so.*
           ${omabroadcast}/libexec/omabroadcast/omabroadcast-browser --check
           touch $out
