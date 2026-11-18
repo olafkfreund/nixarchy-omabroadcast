@@ -26,6 +26,18 @@
 
       formatter.x86_64-linux = pkgs.nixfmt-rfc-style;
 
-      # TODO(step 4): nixosModules.default and checks.x86_64-linux go here.
+      nixosModules.default = import ./nix/module.nix self;
+
+      checks.x86_64-linux = {
+        build = omabroadcast;
+        probe = pkgs.runCommand "omabroadcast-probe" { nativeBuildInputs = [ pkgs.glibc.bin ]; } ''
+          export HOME=$TMPDIR XDG_RUNTIME_DIR=$TMPDIR QT_QPA_PLATFORM=offscreen
+          ${omabroadcast}/bin/omabroadcast --probe
+          ldd ${omabroadcast}/bin/.omabroadcast-wrapped | grep 'libavcodec' | grep -q ffmpeg-omabroadcast
+          grep -a -q apv_vulkan ${ffmpeg-omabroadcast}/lib/libavcodec.so.*
+          ${omabroadcast}/libexec/omabroadcast/omabroadcast-browser --check
+          touch $out
+        '';
+      };
     };
 }
