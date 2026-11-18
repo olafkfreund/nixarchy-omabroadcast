@@ -46,16 +46,19 @@ reviewers:
 ## Steps
 
 1. `flake.nix`, `sources.json` (new): inputs `nixpkgs =
-   github:nixos/nixpkgs/nixos-unstable`. `let sources = lib.importJSON
-   ./sources.json; pkgs = nixpkgs.legacyPackages.x86_64-linux;` outputs
-   `packages.x86_64-linux = { ffmpeg-omabroadcast = pkgs.callPackage
+   github:nixos/nixpkgs/nixos-unstable`. `let pkgs =
+   nixpkgs.legacyPackages.x86_64-linux; sources = pkgs.lib.importJSON
+   ./sources.json; appSrc = …; ffmpeg-omabroadcast = pkgs.callPackage
    ./nix/ffmpeg.nix { inherit sources appSrc; }; omabroadcast =
-   pkgs.callPackage ./nix/package.nix { … }; default = omabroadcast; }`,
-   `formatter = pkgs.nixfmt-rfc-style`. `appSrc = pkgs.fetchFromGitHub {
+   pkgs.callPackage ./nix/package.nix { inherit sources appSrc
+   ffmpeg-omabroadcast; }; in` outputs `packages.x86_64-linux = { inherit
+   ffmpeg-omabroadcast omabroadcast; default = omabroadcast; }`,
+   `formatter.x86_64-linux = pkgs.nixfmt-rfc-style`. `appSrc = pkgs.fetchFromGitHub {
    owner = "28allday"; repo = "omabroadcast"; inherit (sources) rev hash; }`.
    `sources.json` = the initial pins above, keys exactly
    `version, rev, hash, ffmpeg.rev, ffmpeg.hash`.
-   → verify by `nix flake show` (after `git add`).
+   → verify by `jq . sources.json` now; `nix flake show` runs at the end of
+   step 3, once `nix/*.nix` exist and are `git add`ed.
    Traps: flakes only see git-tracked files, so `git add` new files first.
 
 2. `nix/ffmpeg.nix` (new): as decided. `pname = "ffmpeg-omabroadcast"`,
@@ -65,14 +68,18 @@ reviewers:
    (hasSuffix ".patch") (attrNames (readDir "${appSrc}/pkgbuild/ffmpeg"))))`.
    `configurePhase`: `flags=$(sed -n '/^FLAGS="/,/"$/p' ${appSrc}/bin/build-ffmpeg
    | sed 's/^FLAGS="//; s/"$//' | tr '\n' ' ' | sed 's/--prefix=[^ ]*//')`;
-   `./configure --prefix=$out $flags` (no `--disable-programs` removal; upstream
+   then **fail the build** unless `$flags` contains `--enable-gpl`,
+   `--enable-vulkan` and `--enable-shared` (an empty or renamed block must
+   not fall back to defaults); `./configure --prefix=$out $flags` (no `--disable-programs` removal; upstream
    disables them). Inputs as in the spec: nativeBuildInputs nasm pkg-config
    clang glslang; buildInputs x264 x265 svt-av1 libaom dav1d libvpx srt
    libopus snappy gnutls bzip2 xz zlib libdrm libva vulkan-headers
    vulkan-loader nv-codec-headers-12. `enableParallelBuilding = true`,
    `meta.license = lib.licenses.gpl3Plus`.
    → verify by `nix build .#ffmpeg-omabroadcast -L` and
-   `grep -a -c apv_vulkan result/lib/libavcodec.so.*` ≥ 1.
+   `grep -a -c apv_vulkan result/lib/libavcodec.so.*` ≥ 1; and run the
+   extraction pipeline on a copy of `build-ffmpeg` with `FLAGS` renamed to
+   confirm the guard fails.
    Traps: `readDir` on a fetcher output is IFD; fine locally and in CI
    (no `--no-allow-import-from-derivation`). Shell vars in Nix strings:
    escape as `''${…}`. If `--enable-cuda-llvm` fails, check clang is the
@@ -85,9 +92,10 @@ reviewers:
    wayland-scanner`; buildInputs qtbase qtdeclarative qtwebengine qtwayland
    qtsvg qtimageformats qtpositioning qtwebchannel rnnoise vulkan-headers
    vulkan-loader pipewire wayland mesa libdrm ffmpeg-omabroadcast.
-   `dontUseQmakeConfigure = true`; `buildPhase`: `sh bin/shaders; mkdir build
-   && cd build && qmake ../omabroadcast.pro CONFIG+=packaged && make
-   -j$NIX_BUILD_CORES && mkdir browser && (cd browser && qmake
+   `dontUseQmakeConfigure = true`; `buildPhase` (subshells, so the phase
+   ends in the source root): `sh bin/shaders; mkdir -p build/browser;
+   (cd build && qmake ../omabroadcast.pro CONFIG+=packaged && make
+   -j$NIX_BUILD_CORES); (cd build/browser && qmake
    ../../browser/omabroadcast-browser.pro && make -j$NIX_BUILD_CORES)`.
    `installPhase`: `install -Dm755 build/omabroadcast $out/bin/omabroadcast`;
    `install -Dm755 build/browser/omabroadcast-browser
@@ -97,13 +105,19 @@ reviewers:
    `src/engine/models/LICENSE.MODNet`, `${ffmpeg-omabroadcast.src}/COPYING.GPLv3`)
    to `share/licenses/omabroadcast/`. `doInstallCheck = true`;
    `installCheckPhase`: `test -x $out/libexec/omabroadcast/omabroadcast-browser`.
-   `qtWrapperArgs = [ "--set OMABROADCAST_BROWSER_HELPER
-   $out/libexec/omabroadcast/omabroadcast-browser" "--prefix PATH :
-   ${lib.makeBinPath [ slurp ]}" ]` (set in `preFixup` so `$out` expands).
-   meta per spec.
+   `preFixup` (Bash, so `$out` expands; each word its own element):
+   `qtWrapperArgs+=(--set OMABROADCAST_BROWSER_HELPER
+   "$out/libexec/omabroadcast/omabroadcast-browser" --prefix PATH :
+   "${lib.makeBinPath [ slurp ]}")`.
+   `meta = { description = "Record, stream and compose live video on
+   Omarchy"; homepage = "https://github.com/28allday/omabroadcast"; license
+   = with lib.licenses; [ mit gpl3Plus asl20 isc ]; platforms = [
+   "x86_64-linux" ]; mainProgram = "omabroadcast"; }`.
    → verify by `nix build .#omabroadcast -L`, then
    `ldd result/bin/.omabroadcast-wrapped | grep libavcodec` shows
-   `ffmpeg-omabroadcast`.
+   `ffmpeg-omabroadcast`; `grep OMABROADCAST_BROWSER_HELPER result/bin/omabroadcast`;
+   `nix flake show` lists all outputs (IFD from step 2's `readDir` evaluates
+   without extra flags).
    Traps: build in a writable copy (default unpackPhase does this;
    `bin/shaders` writes `src/engine/shaders/gen`). `omabroadcast.pro` reads
    `pkgbuild/PKGBUILD` via `sed` (needs `sed` on PATH: stdenv has it).
@@ -113,22 +127,26 @@ reviewers:
    `options.programs.omabroadcast = { enable = mkEnableOption "OmaBroadcast";
    package = mkOption { type = types.package; default =
    self.packages.${pkgs.stdenv.hostPlatform.system}.omabroadcast; }; }`;
-   config: `environment.systemPackages = [ cfg.package ]`,
+   `config = mkIf cfg.enable { … }` with: `environment.systemPackages = [ cfg.package ]`,
    `xdg.portal.enable = mkDefault true`, `services.pipewire = { enable =
    mkDefault true; pulse.enable = mkDefault true; }`. Flake:
    `nixosModules.default = import ./nix/module.nix self`;
    `checks.x86_64-linux = { build = omabroadcast; probe = pkgs.runCommand
    "omabroadcast-probe" {} ''…''; }` where probe runs
-   `HOME=$TMPDIR XDG_RUNTIME_DIR=$TMPDIR QT_QPA_PLATFORM=offscreen
-   ${omabroadcast}/bin/omabroadcast --probe`,
+   `export HOME=$TMPDIR XDG_RUNTIME_DIR=$TMPDIR QT_QPA_PLATFORM=offscreen`
+   (exported, so both executables get them), then
+   `${omabroadcast}/bin/omabroadcast --probe`,
    `ldd ${omabroadcast}/bin/.omabroadcast-wrapped | grep -q ffmpeg-omabroadcast`,
    `grep -a -q apv_vulkan ${ffmpeg-omabroadcast}/lib/libavcodec.so.*`,
    `${omabroadcast}/libexec/omabroadcast/omabroadcast-browser --check`, then
    `touch $out`.
-   → verify by `nix flake check -L`.
-   Traps: `--probe` needs no display; if it fails in the sandbox on missing
-   `/dev/dri` or D-Bus, record what it printed and make only the failing part
-   tolerant, noted here as a deviation.
+   → verify by `nix flake check -L`, plus module eval both ways:
+   `nix eval --impure --expr` of a minimal `nixpkgs.lib.nixosSystem` with
+   the module and `enable = false` (package absent from
+   `environment.systemPackages`) and `enable = true` (present).
+   Traps: `--probe` needs no display. If it fails in the sandbox (no
+   `/dev/dri`, no D-Bus), diagnose first; the four assertions are approved
+   acceptance conditions and are not weakened without asking the owner.
 
 5. `update.sh` (new, executable, `set -euo pipefail`): as spec. `git
    ls-remote https://github.com/28allday/omabroadcast refs/heads/main`; same
@@ -149,18 +167,24 @@ reviewers:
    update.yml: `on: schedule: cron "0 3 * * *"` + `workflow_dispatch`;
    `concurrency: update`; job `update` `permissions: contents: read`,
    steps: checkout, `DeterminateSystems/nix-installer-action`, `./update.sh`
-   (sets `changed` output by comparing `git diff --quiet sources.json`),
-   `nix flake check -L` if changed, `actions/upload-artifact` name
-   `sources-${{ github.run_id }}` path `sources.json`. Job `commit`:
-   `needs: update`, `if: needs.update.outputs.changed == 'true'`,
-   `permissions: contents: write`, checkout, `actions/download-artifact`
-   (same name) to `$RUNNER_TEMP/a`, `jq -e` validation (exact key set,
+   in a step with `id: bump`, which writes `changed=true|false` (from
+   `git diff --quiet sources.json`) to `$GITHUB_OUTPUT`; the job declares
+   `outputs: changed: ${{ steps.bump.outputs.changed }}`. Then `nix flake
+   check -L` if changed, a background `df` sampler (every 30 s, max of
+   used kB to a file) around the build, printed at the end as peak disk,
+   and `actions/upload-artifact` name `sources-${{ github.run_id }}` path
+   `sources.json`. Job `commit`: `needs: update`, `if:
+   needs.update.outputs.changed == 'true'`, `permissions: contents: write`,
+   checkout, `actions/download-artifact` (same name) with `path: ${{
+   runner.temp }}/a`, then in `run:` use `"$RUNNER_TEMP/a/sources.json"`;
+   `jq -e` validation (exact key set,
    strings, regexes from step 5), `cp` over `sources.json`, `git add
    sources.json`, commit as `github-actions[bot]` with rev from `env:`,
    push. ci.yml: on `push`/`pull_request`, nix installer + `nix flake check -L`.
    All `uses:` pinned to full commit SHAs (look up current tags with
    `gh api repos/<owner>/<repo>/git/ref/tags/<tag>`).
-   → verify by `actionlint` (`nix run nixpkgs#actionlint`).
+   → verify by `actionlint` (`nix run nixpkgs#actionlint`); the end-to-end
+   proof that the output and artifact reach the commit job is step 10.
    Traps: never put `${{ … }}` artifact/upstream values inside `run:`
    scripts; pass through `env:`.
 
@@ -183,7 +207,7 @@ reviewers:
 10. Mine: on `main`, `gh workflow run update.yml` → no-op green. Then commit
     a stale `rev` (40 zeros) to `sources.json` on `main`, dispatch again →
     it re-pins, builds and pushes one commit restoring the real rev. Record
-    cold-run time and peak disk (a `df -h /` step) in the PR/issue.
+    cold-run time and the sampler's peak disk in issue #1.
 
 11. Mine, `~/.config/nixos` (owner's repo; plan approval = go-ahead for
     p620 only): branch `feat/omabroadcast-p620` there. `flake.nix`: input
