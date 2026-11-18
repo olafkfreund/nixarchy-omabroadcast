@@ -125,6 +125,11 @@ reviewers:
    `bin/shaders` writes `src/engine/shaders/gen`). `omabroadcast.pro` reads
    `pkgbuild/PKGBUILD` via `sed` (needs `sed` on PATH: stdenv has it).
    wrapQtAppsHook wraps `bin` and `libexec`.
+   Deviation (done): qtwebengine propagates nixpkgs FFmpeg 9.0.2 with the
+   same sonames (`.so.63`), so the first build ran on 9.0.2 (no APV). The
+   app qmake call now prepends `${ffmpeg-omabroadcast}/lib/pkgconfig` to
+   `PKG_CONFIG_PATH` and passes `QMAKE_LFLAGS+=-Wl,-rpath,<ours>/lib`. Also
+   `libgbm` added to buildInputs (gbm is its own package now).
 
 4. `nix/module.nix` (new), `flake.nix` (edit): module as spec:
    `options.programs.omabroadcast = { enable = mkEnableOption "OmaBroadcast";
@@ -150,6 +155,9 @@ reviewers:
    Traps: `--probe` needs no display. If it fails in the sandbox (no
    `/dev/dri`, no D-Bus), diagnose first; the four assertions are approved
    acceptance conditions and are not weakened without asking the owner.
+   Deviation (done): the probe derivation needs `pkgs.glibc.bin` for `ldd`,
+   and the linkage assertion greps the `libavcodec` line only; the eval test
+   lives in `tests/module-eval.nix`.
 
 5. `update.sh` (new, executable, `set -euo pipefail`): as spec. `git
    ls-remote https://github.com/28allday/omabroadcast refs/heads/main`; same
