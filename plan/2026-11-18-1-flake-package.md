@@ -82,7 +82,10 @@ reviewers:
    confirm the guard fails.
    Traps: `readDir` on a fetcher output is IFD; fine locally and in CI
    (no `--no-allow-import-from-derivation`). Shell vars in Nix strings:
-   escape as `''${…}`. If `--enable-cuda-llvm` fails, check clang is the
+   escape as `''${…}`. Deviation (done): `--enable-cuda-llvm` needs the
+   unwrapped clang: `--nvcc=${lib.getExe buildPackages.clang.cc}`,
+   `hardeningDisable = [ pacret shadowstack zerocallusedregs ]` and
+   `remove-references-to` on `config.h`, as nixpkgs' own ffmpeg does. If `--enable-cuda-llvm` fails, check clang is the
    unwrapped one FFmpeg probes (`clang` on PATH); do not drop the flag
    without updating this plan.
 
