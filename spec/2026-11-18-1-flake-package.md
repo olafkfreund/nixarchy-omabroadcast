@@ -16,124 +16,136 @@ decided below.
 
 Upstream facts this rests on (read from commit `827031a`):
 
-- `bin/build-ffmpeg` pins FFmpeg `47b92841e33b67c1699394415641b34d1157d8d7`
-  (release/9.1) and says why it carries its own: the **Vulkan APV encoder,
-  new in 9.1**, and the NVIDIA-sleep patch. nixpkgs FFmpeg 9.0.2 lacks the
-  encoder, so it is out.
-- The app links FFmpeg through pkg-config (`PKGCONFIG += libavcodec …` in
-  `omabroadcast.pro`). `CONFIG+=carried_ffmpeg` only adds rpaths to
-  `/usr/lib/omabroadcast/...`, which we do not want.
-- The browser helper (`browser/omabroadcast-browser.pro`, Qt WebEngine) is a
-  separate process; the app finds it via `OMABROADCAST_BROWSER_HELPER`,
-  then `applicationDirPath()`, then `/usr/lib/omabroadcast/`
-  (`src/capture/browser_page.cpp:29-35`). nixpkgs `qtwebengine` links its own
-  FFmpeg 9.0.2; it lives in the helper process only, so no clash.
-- Runtime tools the app calls: `hyprctl` (8 sites), `slurp`, `omarchy`.
-- `omabroadcast --probe` with no display runs offscreen, prints and exits
-  (`src/main.cpp:176-183`): our smoke test.
-- MODNet weights (13 MB) are in the repo; no other build-time downloads apart
-  from the FFmpeg git fetch, which we replace.
+- `bin/build-ffmpeg:4-6` pins FFmpeg `47b92841…` (release/9.1) for the
+  **Vulkan APV encoder, new in 9.1**, and the NVIDIA-sleep patch. nixpkgs
+  FFmpeg 9.0.2 lacks the encoder, so it is out. FFmpeg's `configure:3100`:
+  `apv_vulkan_encoder_select="vulkan spirv_compiler …"`, so FFmpeg's build
+  needs glslang. `configure:7109` needs `ffnvcodec >= 12.1.14.0`, which
+  nixpkgs `nv-codec-headers-12` (12.1.14.0) meets.
+- The app links FFmpeg via pkg-config (`omabroadcast.pro:4`).
+  `CONFIG+=carried_ffmpeg` only adds `/usr/lib/omabroadcast` rpaths; we leave
+  it off.
+- **Qt WebEngine runs in two places**: the browser-source helper
+  (`browser/`, a separate process, found via `OMABROADCAST_BROWSER_HELPER`,
+  `src/capture/browser_page.cpp:29-35`) and **custom browser docks, which load
+  WebEngine QML into the app's own process** (`src/main.cpp:172-174`, found
+  via QML import paths, `src/backendbrowser.cpp:14-24`). nixpkgs qtwebengine
+  is linked against nixpkgs FFmpeg 9.0.2; in the app process the app's FFmpeg
+  9.1 (same sonames) is loaded first and serves WebEngine too. That is why
+  upstream's patch `0001-Add-av_stream_get_first_dts-for-Chromium.patch`
+  exists. **Both upstream patches are mandatory**; if one stops applying,
+  the build fails.
+- Runtime tools: `hyprctl` (8 sites), `slurp`, `omarchy`. Secrets go over
+  D-Bus `org.freedesktop.secrets` (`src/control/secrets.cpp:14`), no libsecret.
+- `omabroadcast --probe` with no display runs offscreen, prints and exits 0
+  (`src/main.cpp:176-183`). It returns before the UI and exits 0 without a GPU,
+  so it proves "starts and links", not "works".
+- MODNet weights are in the repo. The only build-time download is
+  `build-ffmpeg`'s `git fetch`, which we replace. `bin/shaders` writes
+  `src/engine/shaders/gen/` in the (writable) unpacked source;
+  `omabroadcast.pro:24-27` reads PKGBUILD with `sed` and writes under
+  `OUT_PWD`; `wayland.pri` runs `wayland-scanner` from PATH. All fine in the
+  sandbox.
 
 ### Files in this repo
 
 | File | Content |
 | ---- | ------- |
-| `flake.nix` | inputs: `nixpkgs` (nixos-unstable). Outputs for `x86_64-linux`: `packages.{omabroadcast,ffmpeg-omabroadcast,default}`, `nixosModules.default`, `checks.probe`, `formatter`. |
+| `flake.nix` | input `nixpkgs` (nixos-unstable). Outputs for `x86_64-linux`: `packages.{omabroadcast,ffmpeg-omabroadcast,default}`, `nixosModules.default`, `checks.{probe,build}`, `formatter`. |
 | `sources.json` | the pins the nightly job rewrites: `{ version, rev, hash, ffmpeg: { rev, hash } }`. |
-| `nix/ffmpeg.nix` | our own FFmpeg derivation: `fetchFromGitHub FFmpeg/FFmpeg` at `ffmpeg.rev`, the patches from upstream's `pkgbuild/ffmpeg/*.patch` (read from the app's `src`, sorted), and **exactly upstream's configure flags** (copied from `bin/build-ffmpeg`, minus `--prefix`). Deps from nixpkgs: x264, x265, svt-av1, libaom, dav1d, libvpx, srt, libopus, snappy, gnutls, bzip2, xz, zlib, libdrm, libva, vulkan-headers/loader, nv-codec-headers (newest in nixpkgs), nasm, clang (`--enable-cuda-llvm`). |
-| `nix/package.nix` | `stdenv.mkDerivation` with `qt6.wrapQtAppsHook`, `qmake`, `pkg-config`, `glslang`, `wayland-scanner`. `src` from `sources.json`. `postPatch`: patch `/usr/lib/omabroadcast/omabroadcast-browser` → `$out/libexec/omabroadcast/omabroadcast-browser`; `pkgver`/`pkgrel` read from PKGBUILD stays (version shows as `0.1.0-62`). Build: run `bin/shaders`, then qmake app with `CONFIG+=packaged`, then qmake the browser; no `bin/build` (it calls `build-ffmpeg`, which fetches). Install the binary, helper, desktop file, icon, licences. Wrapper: `--prefix PATH : slurp` (hyprctl and omarchy come from the host on purpose: they must match the running compositor). `meta.license` = `[ mit gpl3Plus asl20 isc ]`, `platforms = [ "x86_64-linux" ]`, `mainProgram`. |
-| `nix/module.nix` | `programs.omabroadcast.enable` + `.package`; adds it to `environment.systemPackages` and sets `xdg.portal.enable` and `services.pipewire.enable` with `mkDefault` (already true on Nixarchy; harmless elsewhere). No other options. |
-| `update.sh` | reads upstream `main` HEAD (`git ls-remote`); if it differs from `sources.json.rev`, prefetches it (`nix flake prefetch github:28allday/omabroadcast/<rev> --json`), reads FFmpeg's `COMMIT=` and `pkgver` from that tree, prefetches FFmpeg if changed, rewrites `sources.json` with `jq`. Exits 0 with no change when upstream did not move. |
+| `nix/ffmpeg.nix` | `stdenv.mkDerivation`: `fetchFromGitHub FFmpeg/FFmpeg` at `ffmpeg.rev`; `patches` = upstream's `pkgbuild/ffmpeg/*.patch` from the app `src`, sorted. **Flags are read from upstream at build time, not copied**: `configurePhase` extracts the `FLAGS="…"` block from `${appSrc}/bin/build-ffmpeg` with `sed` (never sourced or executed), drops `--prefix=…`, adds `--prefix=$out`. An upstream flag change then either just works or fails configure loudly; it never silently builds stale flags. nativeBuildInputs: nasm, pkg-config, clang (`--enable-cuda-llvm`), glslang. buildInputs: x264, x265, svt-av1, libaom, dav1d, libvpx, srt, libopus, snappy, gnutls, bzip2, xz, zlib, libdrm, libva, vulkan-headers, vulkan-loader, nv-codec-headers-12. `meta.license = gpl3Plus`. |
+| `nix/package.nix` | `stdenv.mkDerivation`, `src` from `sources.json`. nativeBuildInputs: `qt6.qmake`, `qt6.wrapQtAppsHook`, `qt6.qttools`, pkg-config, glslang, wayland-scanner. **buildInputs** (from `omabroadcast.pro:1-4`, `wayland.pri:1`, PKGBUILD depends): qtbase, qtdeclarative, qtwebengine, qtwayland, qtsvg, qtimageformats, qtpositioning, qtwebchannel, rnnoise, vulkan-headers, vulkan-loader, pipewire, wayland, mesa (gbm), libdrm, ffmpeg-omabroadcast. Build: `sh bin/shaders`, `qmake CONFIG+=packaged` + `make` for the app, then the same for `browser/`. No `bin/build`. Install: `$out/bin/omabroadcast`, `$out/libexec/omabroadcast/omabroadcast-browser`, desktop file, icon, licences (app `LICENSE`, `THIRD_PARTY.md`, Lucide, MODNet, FFmpeg's `COPYING.GPLv3`). `installCheckPhase` fails if the helper is missing (the browser `.pro` silently builds nothing without WebEngine). Wrapper (`qtWrapperArgs`, applies to bin and libexec): `--set OMABROADCAST_BROWSER_HELPER $out/libexec/omabroadcast/omabroadcast-browser` (no C++ patch), `--prefix PATH : ${slurp}/bin`. `hyprctl`/`omarchy` come from the host on purpose. `meta.license = [ mit gpl3Plus asl20 isc ]`, `platforms = [ "x86_64-linux" ]`, `mainProgram = "omabroadcast"`. |
+| `nix/module.nix` | `programs.omabroadcast.{enable,package}`; adds the package to `environment.systemPackages`; `xdg.portal.enable` and `services.pipewire.{enable,pulse.enable}` with `mkDefault`. The portal backend, Secret Service and GPU drivers stay host-managed, listed as prerequisites in the README. |
+| `update.sh` | `git ls-remote` upstream `main`; no change → exit 0. Else `nix flake prefetch github:28allday/omabroadcast/<rev> --json` for the hash, then **static parse** (`sed`/`grep`, never source) of `COMMIT=` from `bin/build-ffmpeg` and `pkgver=`/`pkgrel=` from `pkgbuild/PKGBUILD` in the prefetched store path; validate each against a regex (40-hex rev, semver, integer); prefetch FFmpeg if its rev changed; write `sources.json` with `jq`. |
 | `.github/workflows/update.yml` | see below |
-| `.github/workflows/ci.yml` | on push/PR: `nix flake check` (builds `checks.probe`). |
-| `README.md` | install via flake input + module, `nix run`, update policy. |
+| `.github/workflows/ci.yml` | push/PR: `nix flake check`. |
+| `README.md` | install, prerequisites, update policy. |
+
+`checks.probe` (runs in the Nix sandbox): `QT_QPA_PLATFORM=offscreen omabroadcast --probe`
+exits 0; `ldd` of the wrapped binary resolves `libavcodec` to
+`ffmpeg-omabroadcast`; `grep -a apv_vulkan` on that `libavcodec.so` matches;
+`omabroadcast-browser --check` exits 0.
 
 ### Nightly workflow (`update.yml`)
 
 ```mermaid
 flowchart LR
   cron[cron 03:00 UTC / manual] --> A[job update<br/>contents: read]
-  A -->|upstream moved| B[nix build + checks.probe]
-  B -->|green| C[upload sources.json artifact]
+  A -->|upstream moved| B[nix build + flake check]
+  B -->|green| C[artifact: sources.json]
   C --> D[job commit<br/>contents: write]
   D --> E[push to main]
   A -->|no change| X[stop]
 ```
 
-- Job `update` (permissions `contents: read`): checkout, install Nix
+- Job `update` (`permissions: contents: read`): checkout, install Nix
   (`DeterminateSystems/nix-installer-action`), `./update.sh`, then
-  `nix build .#omabroadcast` and `nix flake check`. On success uploads
-  `sources.json` as an artifact and sets output `changed=true`.
-- Job `commit` (needs `update`, `if: changed`, permissions `contents: write`):
-  checkout, download the artifact, check it is valid JSON with only the
-  expected keys, commit `chore: update omabroadcast to <short rev>` and push.
-  It runs no Nix and no upstream code.
-- `concurrency: update`, so a manual run cannot race the cron run.
-- Free-runner fit: Qt 6/WebEngine come from cache.nixos.org; only FFmpeg
-  (~15 min) and the app (~10 min) build, and only on nights upstream moved.
-  No binary cache of our own (shortcut: add `nix-community/cache-nix-action`
-  if build time becomes a problem). The runner has ~14 GB free disk, which is
-  enough for this closure.
+  `nix flake check -L` (builds everything). Upstream code only runs inside
+  Nix builds. On success uploads only `sources.json` as artifact
+  `sources-${{ github.run_id }}`; sets `changed=true`.
+- Job `commit` (needs `update`, `if: changed`, `permissions: contents: write`):
+  checkout, download that run's named artifact into `$RUNNER_TEMP`, validate
+  with `jq` (exact keys, types, regexes as above), copy over `sources.json`,
+  `git add sources.json` only, commit `chore: update omabroadcast to <rev>`
+  (rev passed via env var, not interpolated), push. No Nix, no upstream code.
+- `concurrency: update`. Action versions pinned to commit SHAs.
+- Runner fit is not assumed: verification step 5 measures a cold run (time,
+  peak disk via `df`) and records it in the PR. Shortcut: no binary cache of
+  our own; add `nix-community/cache-nix-action` if the run nears limits.
 
 ### p620
 
-New file `~/.config/nixos/hosts/p620/nixos/omabroadcast.nix` imports
+New `~/.config/nixos/hosts/p620/nixos/omabroadcast.nix` imports
 `inputs.nixarchy-omabroadcast.nixosModules.default` and sets
-`programs.omabroadcast.enable = true`. Flake input
-`nixarchy-omabroadcast = { url = "github:olafkfreund/nixarchy-omabroadcast"; inputs.nixpkgs.follows = "nixpkgs"; }`.
-This follows the `nixarchy-pixelbuds` pattern already in that flake. Committed
-on a branch in `~/.config/nixos`, then `nixos-rebuild switch` on p620.
+`programs.omabroadcast.enable = true`; flake input
+`nixarchy-omabroadcast = { url = "github:olafkfreund/nixarchy-omabroadcast"; inputs.nixpkgs.follows = "nixpkgs"; };`
+(the `nixarchy-pixelbuds` pattern). p620 already runs pipewire-pulse,
+wireplumber, xdg-desktop-portal-hyprland and a Secret Service (checked
+2026-11-18). Committed on a branch in `~/.config/nixos`, then
+`nixos-rebuild switch` on p620.
 
 ## Alternatives rejected
 
-- **nixpkgs FFmpeg 9.0.2 + patches**: lacks the Vulkan APV encoder upstream
-  carries 9.1 for.
+- **nixpkgs FFmpeg 9.0.2 + patches**: no Vulkan APV encoder.
 - **`ffmpeg.overrideAttrs` with 9.1 src**: nixpkgs' generic FFmpeg has
-  version-gated patches and ~150 flags; overriding fights it, and the result
-  differs from what upstream tests. Our 40-line derivation with upstream's
-  exact flags is smaller and faithful.
-- **Running upstream `bin/build` in the derivation**: it `git fetch`es FFmpeg
-  and calls `pacman`; not possible in the sandbox.
-- **Bundling the helper in `$out/bin`**: puts `omabroadcast-browser` on PATH
-  for no reason; `libexec` + the patched path is cleaner.
-- **Update via PR per night**: owner chose direct commit.
-- **Renovate / `nix flake update` on an upstream input**: keeping upstream as
-  a flake input (`flake = false`) would make the bump `nix flake lock
-  --update-input` instead of `sources.json`, but the FFmpeg pin lives inside
-  upstream's shell script and still needs a script to follow it. One file,
-  one script is simpler.
-- **Home Manager module**: not asked for; the NixOS module is one option.
+  version-gated patches and ~150 flags of its own; the result would not be
+  what upstream tests.
+- **Copying upstream's flags into Nix**: drifts silently; reading them at
+  build time cannot.
+- **Running upstream `bin/build`**: it `git fetch`es and calls `pacman`.
+- **Patching the helper path in C++**: the app already reads
+  `OMABROADCAST_BROWSER_HELPER`.
+- **Update PR per night**: owner chose direct commit.
+- **Upstream as a `flake = false` input**: the FFmpeg pin inside upstream's
+  shell script still needs a script; one JSON file + one script is simpler.
+- **Home Manager module**: not asked for.
 
 ## Risks
 
-- **Upstream changes its build** (new `PKGCONFIG`, new shaders step, new
-  download): the nightly build fails, nothing lands, the job shows red. The
-  last good pin stays on `main`. Fix by hand.
-- **nv-codec-headers too old for FFmpeg 9.1**: configure fails. Mitigation:
-  override `nv-codec-headers` src to the version FFmpeg 9.1 asks for.
-- **Patch 0001 does not apply** (it is Arch's patch for 7.x/8.x): drop it in
-  our derivation with a comment; the app does not link WebEngine.
-- **hyprctl from the host must exist**: true on p620 (Hyprland); on other
-  compositors those features fail the same way they do on Arch.
-- **p620 switch**: rebuilds the running desktop; rollback is the previous
-  generation (`nixos-rebuild switch --rollback`). No other host changes.
-- **Licence**: the GPL-3 FFmpeg build is in `$out`; the licences directory
-  ships FFmpeg's `COPYING.GPLv3` and the app's `THIRD_PARTY.md`, and the
-  source is the public flake plus its pinned sources.
+- **Upstream build changes** (new pkg-config dep, new step): nightly build
+  fails, nothing lands, job is red; last good pin stays. Fixed by hand.
+- **FFmpeg 9.1 and nixpkgs WebEngine in one process**: WebEngine was built
+  against 9.0.2 headers and runs on our 9.1. Upstream does the same on Arch
+  (WebEngine built against Arch's FFmpeg), so the ABI risk is the one upstream
+  already takes. Tested by hand with a custom browser dock.
+- **Same-soname shadowing elsewhere**: any Qt multimedia plugin loaded in the
+  app also gets our FFmpeg. Same as upstream.
+- **hyprctl must be on the host**: true on p620.
+- **p620 switch** rebuilds the running desktop; rollback is
+  `nixos-rebuild switch --rollback`. No other host changes.
+- **Licence**: the GPL-3 FFmpeg ships in the closure; licences installed as
+  above; the corresponding source is the public flake + its pins.
 
 ## Verification
 
-1. `nix build .#omabroadcast` succeeds in the sandbox.
-2. `nix flake check` passes; `checks.probe` runs `omabroadcast --probe`
-   offscreen and exits 0.
-3. `ldd result/bin/.omabroadcast-wrapped | grep libavcodec` points at
-   `ffmpeg-omabroadcast-9.1`, and FFmpeg's configure log
-   (`config.h` in the build, or `strings libavcodec.so`) shows the Vulkan APV
-   encoder enabled.
-4. `nix run .#omabroadcast -- --probe` prints the machine survey on p620.
-5. Workflow: a manual `workflow_dispatch` run with `sources.json` set back one
-   commit (or at the current pin, giving a no-op) completes green and, for the
-   changed case, pushes one commit.
-6. p620 after the switch: the app is in the launcher; by hand: preview shows
-   a screen source via the portal picker, a 10 s recording to a file plays
-   back, and a browser source loads a page.
+1. `nix build .#omabroadcast` in the sandbox.
+2. `nix flake check` passes (`checks.probe` as above).
+3. `nix run .#omabroadcast -- --probe` on p620 lists the GPU and encoders.
+4. CI: `ci.yml` green on the PR.
+5. `update.yml` via `workflow_dispatch` twice: once at the current pin
+   (no-op, green), once after committing a stale `rev` to `sources.json`
+   (upstream has a single commit, so it can't go back one): it re-pins,
+   builds and pushes one commit. Cold-run time and peak disk recorded.
+6. p620 after the switch, by hand: launcher entry; screen source via the
+   portal picker in preview; 10 s recording plays back; a browser source
+   loads a page; a custom browser dock opens.
